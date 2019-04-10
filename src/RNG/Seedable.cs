@@ -1,0 +1,157 @@
+﻿using System;
+using System.Security.Cryptography;
+
+namespace LM.MyRNG {
+    //Abstract base class for all seedable random number generators.
+    //Seedable is a generic abstract class which inherits the RNG base class.
+    //The TInteg type must be one of the standard integer types, namely int, uint, ulong, etc.
+    //Seedable provides a common seeding "interface". This class implements both a means to generate new random seed values and to randomize the generator.
+    //Concrete subclasses need only implement the SetSeed(TInteg[]) method and the SeedLength property.
+    //It is recommended that the default constructor of a subclass put the generator into a known starting state, rather than a random state.
+    //An additional constructor with an option to randomize may easily be provided.
+    //Seedable generators may also optionally inherit from one or more of the following interfaces: IClonable, IConcordant, IJumpable.
+    public abstract class Seedable<TInteg> : RNG where TInteg : struct {
+        private static readonly int TypeSize = RNGUtil.GenericIntegralSize(typeof(TInteg), true);
+
+        //Subclasses must supply 'randMax', the maximum possible value returned by the implementation of the Rng.Next() method.
+        public Seedable(ulong randMax) : base(randMax) {
+        }
+        
+        public override bool IsSeedable { get { return true; } }
+
+        //A convenience method which returns the Type object pertaining to the TInteg integer type, namely: typeof(TInteg).
+        public Type SeedIntegType {
+            get { return typeof(TInteg); }
+        }
+
+        //A convenience method which returns the size, in bytes, of the TInteg type. For Seedable<ulong> the result would be 8, for example.
+        public int SeedIntegSize {
+            get { return TypeSize; }
+        }
+
+        //The length of the array needed to seed the generator in units of the TInteg type.
+        //This property is abstract and is to be implemented in the algorithm Subclass. The value should be non-zero and remain constant.
+        public abstract int SeedLength { get; }
+
+        //Sets the generator to a new state using an array of integer seed values.
+        //The type TInteg is an integer type (i.e. uint, ulong, etc.), as defined by the generator subclass.
+        //If seed is null, the generator will be reset to its starting state. Otherwise, seed should be at least SeedLength items in length.
+        //This method is abstract and is to be implemented in the algorithm subclass.
+        //Whether or not an array shorter than SeedLength may be used to seed the generator is implementation dependent.
+        //The suggested behavior for a zero length array is to do nothing.
+        //For an array that is short, but not empty, SetSeed(TInteg[]) should throw ArgumentException if the generator cannot be seeded.
+        //Implementations of SetSeed(TInteg[]) must not throw an exception if seed is null.
+        //When implementing this, the subclass should call RNG.ResetCache() to ensure that results from all RNG routines are repeatable after re-seeding.
+        //seed - Array of SeedLength values (null resets).
+        public abstract void SetSeed(TInteg[] seed);
+
+        //Sets the generator to a new state, defined by a single 64-bit integer seed value.
+        //This overloaded variant of SetSeed() provides a convenient means to seed any generator with a single integer value.
+        //Its behavior is as follows:
+        //  If SeedLength is 1, the seed value will be cast to the corresponding TInteg type, copied to an array of length 1,
+        //and passed directly to SetSeed(TInteg[]).
+        //  If SeedLength is larger than 1, the integer seed will be "expanded" to an array of SeedLength values,
+        //which will then be passed to SetSeed(TInteg[]).
+        //The number of possible seed values using this method may be significantly less than that supported by the SetSeed(TInteg[]) array variant.
+        public virtual void SetSeed(ulong seed) {
+            if(SeedLength == 1) {
+                var arr = new TInteg[1];
+                arr[0] = (TInteg)(dynamic)seed;
+                SetSeed(arr);
+            }
+            else {
+                Generators.SplitMix64 tmp = new Generators.SplitMix64();
+                tmp.SetSeed(seed);
+                byte[] bs = tmp.GetBytes(TypeSize * SeedLength);
+                SetSeed(RNGUtil.ConvertBytesToArray<TInteg>(bs));
+            }
+        }
+        
+        public void SetSeed(long seed) {
+            SetSeed((ulong)seed);
+        }
+
+        //Randomizes the internal generator state.
+        public void RandomizeInternalState() {
+            SetSeed(GenerateSeed());
+        }
+
+        //Generates a new random seed of SeedLength values for use with seeding the generator, but does not modify the state of the generator itself.
+        //It is called by RandomizeInternalState().
+        //The seed is generated by the underlying OS via the RNGCryptoServiceProvider class.
+        //It may be overridden to generate seeds according to custom requirements.
+        public virtual TInteg[] GenerateSeed() {
+            TInteg[] rslt = null;
+            byte[] bytes = new byte[SeedLength * TypeSize];
+
+            if(bytes.Length > 0) {
+                RNGCryptoServiceProvider crypto = new RNGCryptoServiceProvider();
+                crypto.GetBytes(bytes);
+
+                rslt = RNGUtil.ConvertBytesToArray<TInteg>(bytes);
+            }
+
+            return rslt;
+        }
+
+        //Calls Next() 'count' times to discard output and roll the internal state forward. It may be overridden if required.
+        //count - Number of outputs to discard.
+        public virtual void Discard(long count) {
+            while(--count > -1) {
+                Next();
+            }
+        }
+
+        //Creates a new instance of the generator class seeded with the supplied array.
+        //If seed is null, the new generator will be in its default state. See SetSeed(TInteg[]) for more information.
+        //seed - Array of SeedLength values (null sets default).
+        public RNG NewInstance(TInteg[] seed) {
+            var obj = (Seedable<TInteg>)NewInstance();
+            if(seed != null) {
+                obj.SetSeed(seed);
+            }
+
+            return obj;
+        }
+
+        //Creates a new instance of the generator class seeded with the supplied 64-bit integer value.
+        public RNG NewInstance(ulong seed) {
+            var obj = (Seedable<TInteg>)NewInstance();
+            obj.SetSeed(seed);
+
+            return obj;
+        }
+
+        //Same as NewInstance(ulong), but provided for convenience. The value is simply cast to the ulong type.
+        public RNG NewInstance(long seed) {
+            return NewInstance((ulong)seed);
+        }
+
+        //Creates a new instance of the generator class with an option to randomize its state.
+        //If randomize is true, RandomizeInternalState() will be called on the new instance, otherwise it will be in its default state.
+        public RNG NewInstance(bool randomize) {
+            var obj = (Seedable<TInteg>)NewInstance();
+            if(randomize) {
+                obj.RandomizeInternalState();
+            }
+
+            return obj;
+        }
+
+        //Creates a new array of type TInteg with SeedLength items. All element values will be 0.
+        //Do not use it to seed a generator directly; use GenerateSeed() to create an array of random values.
+        public TInteg[] NewSeedArray() {
+            return new TInteg[SeedLength];
+        }
+
+        //Creates a new array of type TInteg with SeedLength items. All elements will be set to 'value'.
+        public TInteg[] NewSeedArray(TInteg value) {
+            var rslt = new TInteg[SeedLength];
+            for(int n = 0; n < rslt.Length; ++n) {
+                rslt[n] = value;
+            }
+
+            return rslt;
+        }
+    }
+}
